@@ -43,7 +43,7 @@ ordered_set.py 的现有头部仅给出 MIT 许可与配方来源，未提供完
 
 ## 版本与更新渠道
 
-为增强版采用能区分上游的标签，例如 **v3.2.6-kokkorylien.1**；发布说明同时列出基础版本 3.2.6 和本增强版的变化。
+增强版标签统一采用 **v<上游版本>-ko.<修订号>**，例如 **v3.2.6-ko.1**，后续同一基础版本的更新依次使用 **v3.2.6-ko.2**、**v3.2.6-ko.3**。发布说明同时列出基础版本和本增强版的变化；不移动或覆盖已发布标签。
 
 更新按钮现已改为打开本增强版的 GitHub Releases 页面，供用户手动下载和安装，不再自动下载或解压上游包。插件帮助与问题反馈链接也已指向本增强版仓库；原作者署名继续保留。
 
@@ -81,5 +81,5 @@ GitHub 自动生成的 Source code ZIP 主要用于源码快照。Release 另外
 
 本工作区已另行准备 `.valvesource-tools/push-valvesource.cmd`、原生 OpenSSH 配置和独立密钥，固定推送 `Kokkorylien/Blender-Source-Tools-SMD-VTA` 的 `main` 分支，并核对远端 SHA。维护者需先创建空仓库，再把专用公钥加入该仓库的 Deploy keys，勾选 Allow write access；私钥仅保留本机，不属于公开源码。
 
-首次发布使用 `push-valvesource.cmd -Tag v3.2.6-kokkorylien.1`。推送版本标签后，`.github/workflows/release.yml` 使用仓库自带的短期 GITHUB_TOKEN，打包十五个公开插件文件，创建 Release 并上传安装 ZIP 与 SHA-256；无需另行配置个人访问令牌。仓库需启用 GitHub Actions。发布后应检查 Actions 结果、Release 安装包及远端提交，不将成功推送等同于发行版已完成。
+首发标签为 `v3.2.6-ko.1`。更新时先创建指向当前提交的新标签，再运行例如 `push-valvesource.cmd -Tag v3.2.6-ko.2`。推送版本标签后，`.github/workflows/release.yml` 使用仓库自带的短期 GITHUB_TOKEN，打包十五个公开插件文件，创建 Release 并上传安装 ZIP 与 SHA-256；无需另行配置个人访问令牌。仓库需启用 GitHub Actions。发布后应检查 Actions 结果、Release 安装包及远端提交，不将成功推送等同于发行版已完成。
 

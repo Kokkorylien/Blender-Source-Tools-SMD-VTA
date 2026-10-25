@@ -1,4 +1,4 @@
-# SMD/VTA Workflow Edition — v3.2.6-kokkorylien.1
+# SMD/VTA Workflow Edition — v3.2.6-ko.1
 
 Unofficial Blender Source Tools 3.2.6 modification by Kokkorylien, targeting **Blender 4.0.2**.
 

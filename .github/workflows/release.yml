@@ -3,7 +3,7 @@ name: Publish installable Blender add-on
 on:
   push:
     tags:
-      - 'v*-kokkorylien.*'
+      - 'v*-ko.*'
 
 permissions:
   contents: write
