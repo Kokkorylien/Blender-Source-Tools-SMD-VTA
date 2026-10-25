@@ -1,0 +1,35 @@
+name: Publish installable Blender add-on
+
+on:
+  push:
+    tags:
+      - 'v*-kokkorylien.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build installation package
+        run: python3 .github/scripts/package_release.py
+      - name: Publish release and assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
+              --draft \
+              --verify-tag \
+              --title "SMD/VTA Workflow Edition — $RELEASE_TAG" \
+              --notes-file .github/RELEASE_NOTES.md
+          fi
+          gh release upload "$RELEASE_TAG" --clobber \
+            dist/io_scene_valvesource.zip \
+            dist/io_scene_valvesource.zip.sha256
+          gh release edit "$RELEASE_TAG" --draft=false

@@ -58,9 +58,9 @@ The following files contain this edition's workflow changes. Their modification 
 | import_smd.py | Translatable import options and warning messages / 将导入选项与警告消息接入翻译 |
 | update.py | Open this edition's GitHub releases for manual updates / 改为打开本增强版 GitHub 发行页，供用户手动更新 |
 
-README files, this provenance record, and the release guidance were added for this edition. Existing original source copyright and license headers are preserved. The program follows GPL-2.0-or-later, with the separately identified MIT-licensed modules retaining their own notices.
+README files, this provenance record, release guidance and automated GitHub release packaging were added for this edition. Existing original source copyright and license headers are preserved. The program follows GPL-2.0-or-later, with the separately identified MIT-licensed modules retaining their own notices.
 
-本增强版新增 README、来源记录及发布说明。原有源码版权与许可头部予以保留；程序沿用 GPL-2.0-or-later，另行标明的 MIT 模块保留其自身声明。
+本增强版新增 README、来源记录、发布说明及 GitHub 自动发布打包流程。原有源码版权与许可头部予以保留；程序沿用 GPL-2.0-or-later，另行标明的 MIT 模块保留其自身声明。
 
 ## Further provenance / 后续来源追溯
 
