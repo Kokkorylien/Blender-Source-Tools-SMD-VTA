@@ -79,7 +79,7 @@ GitHub 自动生成的 Source code ZIP 主要用于源码快照。Release 另外
 
 新插件应另建独立克隆、独立发布工具目录和新仓库专用 Deploy Key，并固定源目录、目标仓库及分支。GitHub Deploy Key 按仓库授权，同一把 Deploy Key 不能作为多个仓库的专用密钥重复添加。不要复制、提交或在文档中写入现有私钥。
 
-本工作区已另行准备 `.valvesource-tools/push-valvesource.cmd`、专用 SSH 包装器和独立密钥，固定推送 `Kokkorylien/Blender-Source-Tools-SMD-VTA` 的 `main` 分支，并核对远端 SHA。维护者需先创建空仓库，再把专用公钥加入该仓库的 Deploy keys，勾选 Allow write access；私钥仅保留本机，不属于公开源码。
+本工作区已另行准备 `.valvesource-tools/push-valvesource.cmd`、原生 OpenSSH 配置和独立密钥，固定推送 `Kokkorylien/Blender-Source-Tools-SMD-VTA` 的 `main` 分支，并核对远端 SHA。维护者需先创建空仓库，再把专用公钥加入该仓库的 Deploy keys，勾选 Allow write access；私钥仅保留本机，不属于公开源码。
 
 首次发布使用 `push-valvesource.cmd -Tag v3.2.6-kokkorylien.1`。推送版本标签后，`.github/workflows/release.yml` 使用仓库自带的短期 GITHUB_TOKEN，打包十五个公开插件文件，创建 Release 并上传安装 ZIP 与 SHA-256；无需另行配置个人访问令牌。仓库需启用 GitHub Actions。发布后应检查 Actions 结果、Release 安装包及远端提交，不将成功推送等同于发行版已完成。
 
