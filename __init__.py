@@ -1,4 +1,6 @@
 #  Copyright (c) 2014 Tom Edwards contact@steamreview.org
+#  Modified by Kokkorylien, 2026-10-25: per-exportable SMD/VTA settings,
+#  VTA confirmation and batch properties, and independent export list targeting.
 #
 # ##### BEGIN GPL LICENSE BLOCK #####
 #
@@ -19,15 +21,15 @@
 # ##### END GPL LICENSE BLOCK #####
 
 bl_info = {
-	"name": "Blender Source Tools",
+	"name": "Blender Source Tools - SMD/VTA Workflow Edition",
 	"author": "Tom Edwards (translators: Grigory Revzin)",
 	"version": (3, 2, 6),
 	"blender": (2, 92, 0),
 	"category": "Import-Export",
 	"location": "File > Import/Export, Scene properties",
-	"wiki_url": "http://steamcommunity.com/groups/BlenderSourceTools",
-	"tracker_url": "http://steamcommunity.com/groups/BlenderSourceTools/discussions/0/",
-	"description": "Importer and exporter for Valve Software's Source Engine. Supports SMD\VTA, DMX and QC."
+	"wiki_url": "https://github.com/Kokkorylien/Blender-Source-Tools-SMD-VTA#readme",
+	"tracker_url": "https://github.com/Kokkorylien/Blender-Source-Tools-SMD-VTA/issues",
+	"description": "Importer and exporter for Valve Software's Source Engine. Supports SMD\\VTA, DMX and QC."
 }
 
 import bpy, os
@@ -48,6 +50,10 @@ for collection in [bpy.app.handlers.depsgraph_update_post, bpy.app.handlers.load
 
 from . import datamodel, import_smd, export_smd, flex, GUI, update
 from .utils import *
+
+bl_info["description"] = get_id("bl_info_description")
+bl_info["location"] = get_id("bl_info_location")
+bl_info["author"] = get_id("bl_info_author")
 
 class ValveSource_Exportable(bpy.types.PropertyGroup):
 	ob_type : StringProperty()
@@ -71,34 +77,34 @@ def menu_func_textedit(self,context):
 	self.layout.operator(flex.InsertUUID.bl_idname)
 
 def export_active_changed(self, context):
-	if not context.scene.vs.export_list_active < len(context.scene.vs.export_list):
-		context.scene.vs.export_list_active = len(context.scene.vs.export_list) - 1
+	if State._updating_export_list:
 		return
-
-	item = get_active_exportable(context).item
-	
-	if type(item) == bpy.types.Collection and item.vs.mute: return
-	for ob in context.scene.objects: ob.select_set(False)
-	
-	if type(item) == bpy.types.Collection:
-		context.view_layer.objects.active = item.objects[0]
-		for ob in item.objects: ob.select_set(True)
-	else:
-		item.select_set(True)
-		context.view_layer.objects.active = item
+	list_len = len(self.export_list)
+	if not (0 <= self.export_list_active < list_len):
+		self.export_list_active = max(0, list_len - 1)
+		return
+	if self.id_data == context.scene:
+		# A list click selects an export target only; leave the scene untouched.
+		getSelectionState(context)['exportable'] = getExportableKey(self.export_list[self.export_list_active])
 #
 # Property Groups
 #
 from bpy.types import PropertyGroup
 
 encodings = []
-for enc in datamodel.list_support()['binary']: encodings.append( (str(enc), f"Binary {enc}", '' ) )
+for enc in datamodel.list_support()['binary']: encodings.append( (str(enc), get_id("dmx_binary", True).format(enc), '' ) )
 formats = []
 for version in set(x for x in [*dmx_versions_source1.values(), *dmx_versions_source2.values()] if x.format != 0):
 	formats.append((version.format_enum, version.format_title, ''))
 formats.sort(key = lambda f: f[0])
 
 directory_subtype = 'DIR_PATH' if bpy.app.version != (3,1,0) else 'NONE' # https://developer.blender.org/T96691
+
+smd_vta_modes = (
+	('BOTH', get_id("smd_vta_both"), get_id("smd_vta_both_tip")),
+	('SMD', get_id("smd_vta_smd"), get_id("smd_vta_smd_tip")),
+	('VTA', get_id("smd_vta_vta"), get_id("smd_vta_vta_tip")),
+)
 
 class ValveSource_SceneProps(PropertyGroup):
 	export_path : StringProperty(name=get_id("exportroot"),description=get_id("exportroot_tip"), subtype=directory_subtype)
@@ -109,30 +115,42 @@ class ValveSource_SceneProps(PropertyGroup):
 	dmx_encoding : EnumProperty(name=get_id("dmx_encoding"),description=get_id("dmx_encoding_tip"),items=tuple(encodings),default='2')
 	dmx_format : EnumProperty(name=get_id("dmx_format"),description=get_id("dmx_format_tip"),items=tuple(formats),default='1')
 	
-	export_format : EnumProperty(name=get_id("export_format"),items=( ('SMD', "SMD", "Studiomdl Data" ), ('DMX', "DMX", "Datamodel Exchange" ) ),default='DMX')
+	export_format : EnumProperty(name=get_id("export_format"),description=get_id("export_format_tip"),items=( ('SMD', "SMD", get_id("export_format_smd_tip") ), ('DMX', "DMX", get_id("export_format_dmx_tip") ) ),default='DMX')
 	up_axis : EnumProperty(name=get_id("up_axis"),items=axes,default='Z',description=get_id("up_axis_tip"))
 	material_path : StringProperty(name=get_id("dmx_mat_path"),description=get_id("dmx_mat_path_tip"))
 	export_list_active : IntProperty(name=get_id("active_exportable"),default=0,min=0,update=export_active_changed)
 	export_list : CollectionProperty(type=ValveSource_Exportable,options={'SKIP_SAVE','HIDDEN'})
-	use_kv2 : BoolProperty(name="Write KeyValues2",description="Write ASCII DMX files",default=False)
+	use_kv2 : BoolProperty(name=get_id("write_kv2"),description=get_id("write_kv2_tip"),default=False)
 	game_path : StringProperty(name=get_id("game_path"),description=get_id("game_path_tip"),subtype=directory_subtype,update=State.onGamePathChanged)
 	dmx_weightlink_threshold : FloatProperty(name=get_id("dmx_weightlinkcull"),description=get_id("dmx_weightlinkcull_tip"),max=1,min=0)
-	smd_format : EnumProperty(name=get_id("smd_format"), items=(('SOURCE', "Source", "Source Engine (Half-Life 2)") , ("GOLDSOURCE", "GoldSrc", "GoldSrc engine (Half-Life 1)")), default="SOURCE")
+	smd_format : EnumProperty(name=get_id("smd_format"), description=get_id("smd_format_tip"), items=(('SOURCE', get_id("smd_format_source"), get_id("smd_format_source_tip")) , ("GOLDSOURCE", get_id("smd_format_goldsrc"), get_id("smd_format_goldsrc_tip"))), default="SOURCE")
+	vta_warn_frames : IntProperty(name=get_id("vta_warn_frames"), description=get_id("vta_warn_frames_tip"), default=64, min=0)
+	vta_warn_mb : IntProperty(name=get_id("vta_warn_mb"), description=get_id("vta_warn_mb_tip"), default=128, min=0)
+	batch_smd_vta_mode : EnumProperty(name=get_id("batch_smd_vta_mode"), description=get_id("batch_smd_vta_mode_tip"), items=smd_vta_modes, default='BOTH')
+	batch_vta_skip_normals : BoolProperty(name=get_id("batch_vta_skip_normals"), description=get_id("batch_vta_skip_normals_tip"), default=False)
 
 class ValveSource_VertexAnimation(PropertyGroup):
-	name : StringProperty(name="Name",default="VertexAnim")
-	start : IntProperty(name="Start",description=get_id("vca_start_tip"),default=0)
-	end : IntProperty(name="End",description=get_id("vca_end_tip"),default=250)
+	name : StringProperty(name=get_id("vca_name"),default="VertexAnim")
+	start : IntProperty(name=get_id("vca_start"),description=get_id("vca_start_tip"),default=0)
+	end : IntProperty(name=get_id("vca_end"),description=get_id("vca_end_tip"),default=250)
 	export_sequence : BoolProperty(name=get_id("vca_sequence"),description=get_id("vca_sequence_tip"),default=True)
 
 class ExportableProps():
 	flex_controller_modes = (
-		('SIMPLE',"Simple",get_id("controllers_simple_tip")),
-		('ADVANCED',"Advanced",get_id("controllers_advanced_tip"))
+		('SIMPLE',get_id("controllers_simple"),get_id("controllers_simple_tip")),
+		('ADVANCED',get_id("controllers_advanced"),get_id("controllers_advanced_tip"))
 	)
 
 	export : BoolProperty(name=get_id("scene_export"),description=get_id("use_scene_export_tip"),default=True)
 	subdir : StringProperty(name=get_id("subdir"),description=get_id("subdir_tip"))
+	smd_vta_mode : EnumProperty(
+		name=get_id("smd_vta_mode"),
+		description=get_id("smd_vta_mode_tip"),
+		items=smd_vta_modes,
+		default='BOTH')
+	vta_first_shape : StringProperty(name=get_id("vta_first_shape"), description=get_id("vta_first_shape_tip"))
+	vta_last_shape : StringProperty(name=get_id("vta_last_shape"), description=get_id("vta_last_shape_tip"))
+	vta_skip_shape_normals : BoolProperty(name=get_id("vta_skip_shape_normals"), description=get_id("vta_skip_shape_normals_tip"), default=False)
 	flex_controller_mode : EnumProperty(name=get_id("controllers_mode"),description=get_id("controllers_mode_tip"),items=flex_controller_modes,default='SIMPLE')
 	flex_controller_source : StringProperty(name=get_id("controller_source"),description=get_id("controllers_source_tip"),subtype='FILE_PATH')
 
@@ -160,7 +178,7 @@ class ValveSource_CollectionProps(ExportableProps,PropertyGroup):
 class ShapeTypeProps():
 	flex_stereo_sharpness : FloatProperty(name=get_id("shape_stereo_sharpness"),description=get_id("shape_stereo_sharpness_tip"),default=90,min=0,max=100,subtype='PERCENTAGE')
 	flex_stereo_mode : EnumProperty(name=get_id("shape_stereo_mode"),description=get_id("shape_stereo_mode_tip"),
-								 items=tuple(list(axes) + [('VGROUP','Vertex Group',get_id("shape_stereo_mode_vgroup"))]), default='X')
+								 items=tuple(list(axes) + [('VGROUP',get_id("shape_stereo_mode_vgroup_label"),get_id("shape_stereo_mode_vgroup"))]), default='X')
 	flex_stereo_vg : StringProperty(name=get_id("shape_stereo_vgroup"),description=get_id("shape_stereo_vgroup_tip"))
 
 class CurveTypeProps():
@@ -190,7 +208,11 @@ _classes = (
 	ValveSource_CurveProps,
 	ValveSource_TextProps,
 	GUI.SMD_MT_ExportChoice,
+	GUI.SMD_MT_ExportableSettings,
+	GUI.SMD_OT_SetExportMode,
+	GUI.SMD_OT_ToggleSkipNormals,
 	GUI.SMD_PT_Scene,
+	GUI.SMD_PT_SelectedExportable,
 	GUI.SMD_MT_ConfigureScene,
 	GUI.SMD_UL_ExportItems,
 	GUI.SMD_UL_GroupItems,
@@ -199,10 +221,12 @@ _classes = (
 	GUI.SMD_OT_RemoveVertexAnimation,
 	GUI.SMD_OT_PreviewVertexAnimation,
 	GUI.SMD_OT_GenerateVertexAnimationQCSnippet,
+	GUI.SMD_OT_ApplyExportSettings,
 	GUI.SMD_OT_LaunchHLMV,
 	GUI.SMD_PT_Object_Config,
 	GUI.SMD_PT_Group,
 	GUI.SMD_PT_VertexAnimation,
+	GUI.SMD_PT_SMD_VTA,
 	GUI.SMD_PT_Armature,
 	GUI.SMD_PT_ShapeKeys,
 	GUI.SMD_PT_VertexMaps,
@@ -214,8 +238,8 @@ _classes = (
 	flex.ActiveDependencyShapes,
 	flex.InsertUUID,
 	update.SmdToolsUpdate,
-	update.SMD_MT_Updated,
 	export_smd.SMD_OT_Compile, 
+	export_smd.SMD_OT_ConfirmLargeVTA,
 	export_smd.SmdExporter, 
 	import_smd.SmdImporter)
 
@@ -250,6 +274,7 @@ def register():
 
 def unregister():
 	State.unhook_events()
+	State._selection.clear()
 
 	bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
 	bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)

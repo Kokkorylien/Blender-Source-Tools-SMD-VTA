@@ -1,4 +1,6 @@
 #  Copyright (c) 2014 Tom Edwards contact@steamreview.org
+#  Modified by Kokkorylien, 2026-10-25: selected exportable configuration,
+#  batch settings, export list summaries, and SMD/VTA range controls.
 #
 # ##### BEGIN GPL LICENSE BLOCK #####
 #
@@ -21,10 +23,68 @@
 import bpy
 from .utils import *
 from .export_smd import SmdExporter, SMD_OT_Compile
-from .update import SmdToolsUpdate # comment this line if you make third-party changes
+from .update import SmdToolsUpdate
 from .flex import *
 
 vca_icon = 'EDITMODE_HLT'
+
+_export_mode_items = (
+	('BOTH', get_id("smd_vta_both"), get_id("smd_vta_both_tip")),
+	('SMD', get_id("smd_vta_smd"), get_id("smd_vta_smd_tip")),
+	('VTA', get_id("smd_vta_vta"), get_id("smd_vta_vta_tip")),
+)
+
+def getExportSettingsTargets(context = None):
+	targets = []
+	for exportable in getSelectedExportables(context):
+		item = exportable.item
+		if item is None:
+			continue
+		if isinstance(item, bpy.types.Object) and item.type == 'ARMATURE':
+			continue
+		targets.append(exportable)
+	return targets
+
+class SMD_OT_SetExportMode(bpy.types.Operator):
+	bl_idname = "smd.set_export_mode"
+	bl_label = get_id("exportmenu_set_mode")
+	bl_options = {'INTERNAL'}
+
+	mode : bpy.props.EnumProperty(items=_export_mode_items)
+
+	def execute(self, context):
+		targets = getExportSettingsTargets(context)
+		for exportable in targets:
+			exportable.item.vs.smd_vta_mode = self.mode
+		return {'FINISHED'}
+
+class SMD_OT_ToggleSkipNormals(bpy.types.Operator):
+	bl_idname = "smd.toggle_skip_normals"
+	bl_label = get_id("exportmenu_toggle_skip_normals")
+	bl_options = {'INTERNAL'}
+
+	def execute(self, context):
+		targets = getExportSettingsTargets(context)
+		if targets:
+			new_value = not bool(targets[0].item.vs.vta_skip_shape_normals)
+			for exportable in targets:
+				exportable.item.vs.vta_skip_shape_normals = new_value
+		return {'FINISHED'}
+
+class SMD_MT_ExportableSettings(bpy.types.Menu):
+	bl_label = get_id("exportmenu_settings")
+
+	def draw(self, context):
+		targets = getExportSettingsTargets(context)
+		if not targets:
+			return
+		item = targets[0].item
+		mode = getattr(item.vs, "smd_vta_mode", 'BOTH')
+		for identifier, label, _tip in _export_mode_items:
+			op = self.layout.operator(SMD_OT_SetExportMode.bl_idname, text=label, depress=(mode == identifier))
+			op.mode = identifier
+		self.layout.separator()
+		self.layout.operator(SMD_OT_ToggleSkipNormals.bl_idname, text=get_id("vta_skip_shape_normals"), depress=bool(item.vs.vta_skip_shape_normals))
 
 class SMD_MT_ExportChoice(bpy.types.Menu):
 	bl_label = get_id("exportmenu_title")
@@ -33,7 +93,7 @@ class SMD_MT_ExportChoice(bpy.types.Menu):
 		l = self.layout
 		l.operator_context = 'EXEC_DEFAULT'
 		
-		exportables = list(getSelectedExportables())
+		exportables = list(getSelectedExportables(context))
 		if len(exportables):
 			single_obs = list([ex for ex in exportables if ex.ob_type != 'COLLECTION'])
 			groups = list([ex for ex in exportables if ex.ob_type == 'COLLECTION'])
@@ -55,6 +115,12 @@ class SMD_MT_ExportChoice(bpy.types.Menu):
 			row.operator(SmdExporter.bl_idname, text=get_id("exportmenu_invalid"),icon='BLANK1')
 			row.enabled = False
 
+		if len(exportables) == 1:
+			target_item = exportables[0].item
+			if target_item and not (isinstance(target_item, bpy.types.Object) and target_item.type == 'ARMATURE'):
+				l.separator()
+				l.menu("SMD_MT_ExportableSettings", text=get_id("exportmenu_settings"))
+
 		row = l.row()
 		num_scene_exports = count_exports(context)
 		row.operator(SmdExporter.bl_idname, text=get_id("exportmenu_scene", True).format(num_scene_exports), icon='SCENE_DATA').export_scene = True
@@ -72,7 +138,7 @@ class SMD_PT_Scene(bpy.types.Panel):
 		scene = context.scene
 		num_to_export = 0
 
-		l.operator(SmdExporter.bl_idname,text="Export")
+		l.operator(SmdExporter.bl_idname,text=get_id("export_button"))
 		
 		row = l.row()
 		row.alert = len(scene.vs.export_path) == 0
@@ -110,6 +176,9 @@ class SMD_PT_Scene(bpy.types.Panel):
 			row = l.split(factor=0.33)
 			row.label(text=get_id("smd_format") + ":")
 			row.row().prop(scene.vs,"smd_format", expand=True)
+			col = l.column(align=True)
+			col.prop(scene.vs, "vta_warn_frames")
+			col.prop(scene.vs, "vta_warn_mb")
 		
 		col = l.column(align=True)
 		row = col.row(align=True)
@@ -121,6 +190,38 @@ class SMD_PT_Scene(bpy.types.Panel):
 	@staticmethod
 	def HelpButton(layout):
 		layout.operator("wm.url_open",text=get_id("help",True),icon='HELP').url = "http://developer.valvesoftware.com/wiki/Blender_Source_Tools_Help#Exporting"
+
+class SMD_PT_SelectedExportable(bpy.types.Panel):
+	bl_label = get_id("selected_exportable_panel")
+	bl_space_type = "PROPERTIES"
+	bl_region_type = "WINDOW"
+	bl_context = "scene"
+	bl_options = set()
+
+	@classmethod
+	def poll(cls, context):
+		return State.exportFormat == ExportFormat.SMD
+
+	def draw(self, context):
+		col = self.layout
+		exportables = list(getSelectedExportables(context))
+		if not exportables:
+			col.label(text=get_id("selected_exportable_none"), icon='INFO')
+			return
+		if len(exportables) > 1:
+			col.label(text=get_id("selected_exportable_multiple", True).format(len(exportables)), icon='INFO')
+		item = exportables[0].item
+		if item is None:
+			return
+		if isinstance(item, bpy.types.Object) and item.type == 'ARMATURE':
+			col.label(text=get_id("selected_exportable_armature"), icon='INFO')
+			return
+
+		icon = 'GROUP' if isinstance(item, bpy.types.Collection) else MakeObjectIcon(item, suffix='_DATA')
+		col.label(text=item.name, icon=icon)
+		col.prop(item.vs, "smd_vta_mode", expand=True)
+		col.prop(item.vs, "vta_skip_shape_normals")
+		col.prop(item.vs, "subdir", icon='FILE_FOLDER')
 
 class SMD_MT_ConfigureScene(bpy.types.Menu):
 	bl_label = get_id("exporter_report_menu")
@@ -144,6 +245,12 @@ class SMD_UL_ExportItems(bpy.types.UIList):
 
 		row = layout.row(align=True)
 		row.alignment='RIGHT'
+
+		if State.exportFormat == ExportFormat.SMD and not (isinstance(item, bpy.types.Object) and item.type == 'ARMATURE'):
+			mode = getattr(item.vs, "smd_vta_mode", 'BOTH')
+			row.label(text={'BOTH': "SMD+VTA", 'SMD': "SMD", 'VTA': "VTA"}.get(mode, mode))
+			if getattr(item.vs, "vta_skip_shape_normals", False):
+				row.label(text=get_id("vta_skip_normals_short"))
 
 		num_shapes, num_correctives = countShapes(item)
 		num_shapes += num_correctives
@@ -271,7 +378,7 @@ $boneflexdriver "vcabone_{0}" ty "multi_{0}" 0 1
 $sequence "{0}" "vcaanim_{0}{1}" fps {2}
 '''.format(vca.name, getFileExt(), fps) for vca in item.vs.vertex_animations if vca.export_sequence])
 		wm.clipboard += "\n// vertex animation block ends\n"
-		self.report({'INFO'},"QC segment copied to clipboard.")
+		self.report({'INFO'},get_id("vca_qc_copied"))
 		return {'FINISHED'}
 
 SMD_OT_CreateVertexMap_idname = "smd.vertex_map_create_"
@@ -334,12 +441,46 @@ for map_name in vertex_maps:
 	bpy.utils.register_class(CreateVertexMap)
 	bpy.utils.register_class(RemoveVertexMap)
 
+class SMD_OT_ApplyExportSettings(bpy.types.Operator):
+	bl_idname = "smd.apply_export_settings"
+	bl_label = get_id("batch_apply")
+	bl_description = get_id("batch_apply_tip")
+	bl_options = {'INTERNAL'}
+
+	scope : bpy.props.EnumProperty(items=(
+		('SELECTED', get_id("batch_apply_selected"), ''),
+		('ALL', get_id("batch_apply_all"), '')), default='SELECTED')
+
+	def execute(self, context):
+		scene = context.scene
+		if self.scope == 'SELECTED':
+			targets = list(getSelectedExportables(context))
+			if not targets:
+				self.report({'WARNING'}, get_id("batch_no_selection"))
+				return {'CANCELLED'}
+		else:
+			targets = list(scene.vs.export_list)
+
+		count = 0
+		for exportable in targets:
+			item = exportable.item
+			if not item:
+				continue
+			if isinstance(item, bpy.types.Object) and item.type == 'ARMATURE':
+				continue
+			item.vs.smd_vta_mode = scene.vs.batch_smd_vta_mode
+			item.vs.vta_skip_shape_normals = scene.vs.batch_vta_skip_normals
+			count += 1
+
+		self.report({'INFO'}, get_id("batch_applied", True).format(count))
+		return {'FINISHED'}
+
 class SMD_PT_Object_Config(bpy.types.Panel):
 	bl_label = get_id('exportables_title')
 	bl_space_type = "PROPERTIES"
 	bl_region_type = "WINDOW"
 	bl_context = "scene"
-	bl_options = {'DEFAULT_CLOSED'}
+	bl_options = set()
 	
 	def draw(self,context):
 		l = self.layout
@@ -356,6 +497,17 @@ class SMD_PT_Object_Config(bpy.types.Panel):
 
 		if not (is_group and item.vs.mute):
 			l.column().prop(item.vs,"subdir",icon='FILE_FOLDER')
+
+		l.separator()
+		box = l.box()
+		box.label(text=get_id("batch_settings"))
+		col = box.column(align=True)
+		col.row().prop(scene.vs, "batch_smd_vta_mode", expand=True)
+		col.prop(scene.vs, "batch_vta_skip_normals")
+		row = col.row(align=True)
+		row.operator(SMD_OT_ApplyExportSettings.bl_idname, text=get_id("batch_apply_selected")).scope = 'SELECTED'
+		row.operator(SMD_OT_ApplyExportSettings.bl_idname, text=get_id("batch_apply_all")).scope = 'ALL'
+		col.label(text=get_id("batch_scope_hint"), icon='INFO')
 
 class ExportableConfigurationPanel(bpy.types.Panel):
 	bl_space_type = "PROPERTIES"
@@ -414,14 +566,100 @@ class SMD_PT_VertexAnimation(ExportableConfigurationPanel):
 	def draw(self, context):
 		item = self.get_item(context)
 		r = self.layout.row(align=True)
-		r.operator(SMD_OT_AddVertexAnimation.bl_idname,icon="ADD",text="Add")
-		op = r.operator(SMD_OT_RemoveVertexAnimation.bl_idname,icon="REMOVE",text="Remove")
+		r.operator(SMD_OT_AddVertexAnimation.bl_idname,icon="ADD",text=get_id("common_add"))
+		op = r.operator(SMD_OT_RemoveVertexAnimation.bl_idname,icon="REMOVE",text=get_id("common_remove"))
 		r.operator("wm.url_open", text=get_id("help",True), icon='HELP').url = "http://developer.valvesoftware.com/wiki/Vertex_animation"
 
 		if item.vs.vertex_animations:
 			op.index = item.vs.active_vertex_animation
 			self.layout.template_list("SMD_UL_VertexAnimationItem","",item.vs,"vertex_animations",item.vs,"active_vertex_animation",rows=2,maxrows=4)
 			self.layout.operator(SMD_OT_GenerateVertexAnimationQCSnippet.bl_idname,icon='SCRIPT')
+
+class SMD_PT_SMD_VTA(ExportableConfigurationPanel):
+	bl_label = get_id("smd_vta_panel")
+	vs_icon = 'MESH_DATA'
+
+	@classmethod
+	def poll(cls, context):
+		item = cls.get_item(context)
+		if not item or State.exportFormat != ExportFormat.SMD:
+			return False
+		if isinstance(item, bpy.types.Object) and item.type == 'ARMATURE':
+			return False
+		return True
+
+	def draw(self, context):
+		item = self.get_item(context)
+		col = self.layout
+		col.row().prop(item.vs, "smd_vta_mode", expand=True)
+
+		if item.vs.smd_vta_mode == 'SMD':
+			col.label(text=get_id("vta_smd_only_hint", True), icon='INFO')
+			return
+
+		if item.vs.smd_vta_mode == 'VTA':
+			col.label(text=get_id("vta_only_hint", True), icon='INFO')
+
+		names = getMergedShapeNames(item)
+		if not names:
+			col.label(text=get_id("vta_no_shapes", True).format(item.name), icon='INFO')
+			return
+
+		search_ob = None
+		if isinstance(item, bpy.types.Collection):
+			active = context.active_object
+			if active and active.name in item.objects and active.vs.export and getShapeKeyNames(active):
+				search_ob = active
+			else:
+				for ob in getExportableMembers(item):
+					if getShapeKeyNames(ob):
+						search_ob = ob
+						break
+		else:
+			search_ob = item
+
+		if not search_ob:
+			return
+
+		col.separator()
+		col.prop_search(item.vs, "vta_first_shape", search_ob.data.shape_keys, "key_blocks")
+		col.prop_search(item.vs, "vta_last_shape", search_ob.data.shape_keys, "key_blocks")
+		basis_name = search_ob.data.shape_keys.key_blocks[0].name
+		if basis_name in (item.vs.vta_first_shape, item.vs.vta_last_shape):
+			row = col.row()
+			row.alert = True
+			row.label(text=get_id("vta_basis_selected", True), icon='ERROR')
+		if not item.vs.vta_first_shape or not item.vs.vta_last_shape:
+			col.label(text=get_id("vta_range_hint", True), icon='INFO')
+		if isinstance(item, bpy.types.Collection):
+			col.label(text=get_id("vta_shape_source", True).format(search_ob.name), icon='MESH_DATA')
+
+		col.separator()
+		col.prop(item.vs, "vta_skip_shape_normals")
+		if item.vs.vta_skip_shape_normals:
+			col.label(text=get_id("vta_skip_shape_normals_hint", True), icon='INFO')
+
+		try:
+			first, last = resolveShapeRange(item, names)
+		except ValueError as err:
+			row = col.row()
+			row.alert = True
+			row.label(text=get_id("vta_range_invalid", True).format(err), icon='ERROR')
+			return
+
+		selected = names[first:last + 1]
+		if not selected:
+			return
+
+		basis_name = "Basis"
+		for ob in getExportableMembers(item):
+			if getShapeKeyNames(ob):
+				basis_name = ob.data.shape_keys.key_blocks[0].name
+				break
+
+		col.label(text=get_id("vta_range_summary", True).format(basis_name, len(selected), selected[0], selected[-1]), icon='SHAPEKEY_DATA')
+		if len(selected) != len(names):
+			col.label(text=get_id("vta_shape_count", True).format(len(selected), len(names)), icon='INFO')
 
 class SMD_PT_Group(ExportableConfigurationPanel):
 	bl_label = get_id("exportables_group_props")
@@ -527,7 +765,7 @@ class SMD_PT_ShapeKeys(ExportableConfigurationPanel):
 					r2.alert = ob.vertex_groups.get(ob.data.vs.flex_stereo_vg) is None
 					r2.prop_search(ob.data.vs,"flex_stereo_vg",ob,"vertex_groups",text="")
 				else:
-					r2.prop(ob.data.vs,"flex_stereo_sharpness",text="Sharpness")
+					r2.prop(ob.data.vs,"flex_stereo_sharpness",text=get_id("sharpness"))
 				r2.prop(ob.data.vs,"flex_stereo_mode",text="")
 				datablocks_dispayed.append(ob.data)
 		else:
@@ -570,7 +808,7 @@ class SMD_PT_VertexMaps(ExportableConfigurationPanel):
 			add_remove = r.row(align=True)
 			add_remove.operator(SMD_OT_CreateVertexMap_idname + map_name,icon='ADD',text="")
 			add_remove.operator(SMD_OT_RemoveVertexMap_idname + map_name,icon='REMOVE',text="")
-			r.operator(SMD_OT_SelectVertexMap_idname + map_name,text="Activate")
+			r.operator(SMD_OT_SelectVertexMap_idname + map_name,text=get_id("activate"))
 			
 class SMD_PT_Curves(ExportableConfigurationPanel):
 	bl_label = get_id("exportables_curve_props")

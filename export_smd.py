@@ -1,4 +1,6 @@
-﻿#  Copyright (c) 2014 Tom Edwards contact@steamreview.org
+#  Copyright (c) 2014 Tom Edwards contact@steamreview.org
+#  Modified by Kokkorylien, 2026-10-25: independent SMD/VTA output, selective
+#  shape baking, VTA preflight confirmation, ranges, and optional base normals.
 #
 # ##### BEGIN GPL LICENSE BLOCK #####
 #
@@ -37,7 +39,7 @@ class SMD_OT_Compile(bpy.types.Operator, Logger):
 	files : CollectionProperty(type=bpy.types.OperatorFileListElement)
 	directory : StringProperty(maxlen=1024, default="", subtype='FILE_PATH')
 
-	filepath : StringProperty(name="File path", maxlen=1024, default="", subtype='FILE_PATH')
+	filepath : StringProperty(name=get_id("file_path"), maxlen=1024, default="", subtype='FILE_PATH')
 	
 	filter_folder : BoolProperty(default=True, options={'HIDDEN'})
 	filter_glob : StringProperty(default="*.qc;*.qci", options={'HIDDEN'})
@@ -53,7 +55,7 @@ class SMD_OT_Compile(bpy.types.Operator, Logger):
 	def execute(self,context):
 		multi_files = len([file for file in self.properties.files if file.name]) > 0
 		if not multi_files and not (self.properties.filepath == "*" or os.path.isfile(self.properties.filepath)):
-			self.report({'ERROR'},"No QC files selected for compile.")
+			self.report({'ERROR'},get_id("qc_compile_err_noselection"))
 			return {'CANCELLED'}
 
 		num = self.compileQCs([os.path.join(self.properties.directory,file.name) for file in self.properties.files] if multi_files else self.properties.filepath)
@@ -126,6 +128,26 @@ class SMD_OT_Compile(bpy.types.Operator, Logger):
 				i+=1
 		return num_good_compiles
 
+class SMD_OT_ConfirmLargeVTA(bpy.types.Operator):
+	bl_idname = "smd.confirm_large_vta"
+	bl_label = get_id("vta_confirm_title")
+	bl_options = {'INTERNAL'}
+
+	summary : StringProperty(default="")
+	collection : StringProperty(default="")
+	export_scene : BoolProperty(default=False)
+
+	def invoke(self, context, event):
+		return context.window_manager.invoke_props_dialog(self, width=520)
+
+	def draw(self, context):
+		col = self.layout.column(align=True)
+		for line in self.summary.split("\n"):
+			col.label(text=line)
+
+	def execute(self, context):
+		return bpy.ops.export_scene.smd(collection=self.collection, export_scene=self.export_scene, confirmed=True)
+
 class SmdExporter(bpy.types.Operator, Logger):
 	bl_idname = "export_scene.smd"
 	bl_label = get_id("exporter_title")
@@ -133,6 +155,7 @@ class SmdExporter(bpy.types.Operator, Logger):
 	
 	collection : bpy.props.StringProperty(name=get_id("exporter_prop_group"),description=get_id("exporter_prop_group_tip"))
 	export_scene : bpy.props.BoolProperty(name=get_id("scene_export"),description=get_id("exporter_prop_scene_tip"),default=False)
+	confirmed : bpy.props.BoolProperty(default=False, options={'HIDDEN'})
 
 	@classmethod
 	def poll(cls,context):
@@ -150,7 +173,7 @@ class SmdExporter(bpy.types.Operator, Logger):
 		if State.datamodelEncoding != 0 and context.scene.vs.export_format == 'DMX':
 			datamodel.check_support("binary",State.datamodelEncoding)
 			if State.datamodelEncoding < 3 and State.datamodelFormat > 11 and not context.scene.vs.use_kv2:
-				self.report({'ERROR'},"DMX format \"Model {}\" requires DMX encoding \"Binary 3\" or later".format(State.datamodelFormat))
+				self.report({'ERROR'},get_id("exporter_err_dmxenc", True).format(State.datamodelFormat))
 				return {'CANCELLED' }
 		if not context.scene.vs.export_path:
 			bpy.ops.wm.call_menu(name="SMD_MT_ConfigureScene")
@@ -160,6 +183,10 @@ class SmdExporter(bpy.types.Operator, Logger):
 			return {'CANCELLED'}
 		if State.datamodelEncoding == 0 and context.scene.vs.export_format == 'DMX':
 			self.report({'ERROR'},get_id("exporter_err_dmxother"))
+			return {'CANCELLED'}
+		
+		State.update_scene()
+		if not self.preflightVTACheck(context):
 			return {'CANCELLED'}
 		
 		# Don't create an undo level from edit mode
@@ -202,22 +229,8 @@ class SmdExporter(bpy.types.Operator, Logger):
 			
 			self.files_exported = self.attemptedExports = 0
 			
-			if self.export_scene:
-				for id in [exportable.item for exportable in context.scene.vs.export_list]:
-					if type(id) == Collection:
-						if shouldExportGroup(id):
-							self.exportId(context, id)
-					elif id.vs.export:
-						self.exportId(context, id)
-			else:
-				if self.collection == "":
-					for exportable in getSelectedExportables():
-						self.exportId(context, exportable.item)
-				else:
-					collection = bpy.data.collections[self.collection]
-					if collection.vs.mute: self.error(get_id("exporter_err_groupmuted", True).format(collection.name))
-					elif not collection.objects: self.error(get_id("exporter_err_groupempty", True).format(collection.name))
-					else: self.exportId(context, collection)
+			for id in self.getExportTargets(context):
+				self.exportId(context, id)
 			
 			num_good_compiles = None
 
@@ -269,10 +282,140 @@ class SmdExporter(bpy.types.Operator, Logger):
 		if new_name != name:
 			self.warning(get_id("exporter_warn_sanitised_filename",True).format(name,new_name))
 		return new_name
-	
-	def exportId(self,context,id):
+
+	def getExportTargets(self, context, report_errors = True):
+		"""The exportables this operator invocation would write, in export order."""
+		targets = []
+		if self.export_scene:
+			for exportable in context.scene.vs.export_list:
+				id = exportable.item
+				if not id: continue
+				if type(id) == bpy.types.Collection:
+					if shouldExportGroup(id): targets.append(id)
+				elif id.vs.export:
+					targets.append(id)
+		elif self.collection == "":
+			for exportable in getSelectedExportables(context):
+				if exportable.item:
+					targets.append(exportable.item)
+		else:
+			collection = bpy.data.collections.get(self.collection)
+			if collection is None:
+				if report_errors:
+					self.error(get_id("exporter_err_groupmissing", True).format(self.collection))
+			elif collection.vs.mute:
+				if report_errors:
+					self.error(get_id("exporter_err_groupmuted", True).format(collection.name))
+			elif not collection.objects:
+				if report_errors:
+					self.error(get_id("exporter_err_groupempty", True).format(collection.name))
+			else:
+				targets.append(collection)
+		return targets
+
+	def _vtaEstimateFor(self, id):
+		names = getMergedShapeNames(id)
+		if not names:
+			return None
+		first, last = resolveShapeRange(id, names)
+		selected = names[first:last + 1]
+		if not selected:
+			return None
+		loops = 0
+		for ob in getExportableMembers(id):
+			data = getattr(ob, "data", None)
+			if not data:
+				continue
+			if ob.type == 'MESH' and hasattr(data, "polygons"):
+				# SMD meshes are triangulated, so each n-gon becomes n-2 triangles (3 loops each).
+				loops += sum(3 * max(0, len(poly.vertices) - 2) for poly in data.polygons)
+			elif hasattr(data, "loops"):
+				loops += len(data.loops)
+		return selected, loops
+
+	def preflightVTACheck(self, context):
+		"""Validate VTA ranges and ask for confirmation before a large VTA export."""
+		if State.exportFormat != ExportFormat.SMD:
+			return True
+		warn_frames = context.scene.vs.vta_warn_frames
+		warn_mb = context.scene.vs.vta_warn_mb
+		total_frames = 0
+		total_bytes = 0
+		max_frames = 0
+		details = []
+
+		for id in self.getExportTargets(context, report_errors=False):
+			mode = getattr(id.vs, "smd_vta_mode", 'BOTH')
+			if mode not in ('BOTH', 'VTA'):
+				continue
+			if isinstance(id, bpy.types.Object) and id.type == 'ARMATURE':
+				continue
+			try:
+				estimate = self._vtaEstimateFor(id)
+			except ValueError as err:
+				message = get_id("vta_range_invalid", True).format(err)
+				self.error(message)
+				self.report({'ERROR'}, message)
+				return False
+			if estimate is None:
+				continue
+			selected, loops = estimate
+			frames = len(selected)
+			est_bytes = loops * (frames + 1) * 60
+			total_frames += frames
+			total_bytes += est_bytes
+			max_frames = max(max_frames, frames)
+			details.append((id.name, frames, loops, est_bytes))
+
+		if not details:
+			return True
+
+		over_frames = warn_frames > 0 and max_frames > warn_frames
+		over_size = warn_mb > 0 and total_bytes > warn_mb * 1024 * 1024
+		if not (over_frames or over_size):
+			return True
+
+		if bpy.app.background:
+			self.warning(get_id("vta_confirm_background", True).format(total_frames, "{:.1f}".format(total_bytes / 1024 / 1024)))
+			return True
+		if self.confirmed:
+			return True
+
+		lines = [get_id("vta_confirm_summary", True).format(total_frames, len(details), "{:.1f}".format(total_bytes / 1024 / 1024)), ""]
+		for name, frames, loops, est_bytes in details[:8]:
+			lines.append(get_id("vta_confirm_detail", True).format(name[:40], frames, loops, "{:.1f}".format(est_bytes / 1024 / 1024)))
+		if len(details) > 8:
+			lines.append(get_id("vta_confirm_more", True).format(len(details) - 8))
+
+		bpy.ops.smd.confirm_large_vta('INVOKE_DEFAULT',
+			summary="\n".join(lines),
+			collection=self.collection,
+			export_scene=self.export_scene)
+		return False
+
+	def exportId(self,context,id,reset_bakes = True):
 		self.attemptedExports += 1
 		self.armature = self.armature_src = None
+		self._node_ids_prepared = False
+		if reset_bakes:
+			# The shape baking policy is per exportable, so don't reuse another item's bakes.
+			# (Recursive VCA exports keep the outer operation's bakes.)
+			self.bake_results = []
+		is_armature = isinstance(id, bpy.types.Object) and id.type == 'ARMATURE'
+		mode = getattr(id.vs, "smd_vta_mode", 'BOTH')
+		self._bake_shapes = State.exportFormat == ExportFormat.DMX or ((not is_armature) and mode in ('BOTH', 'VTA'))
+		self._shape_filter = None
+		if State.exportFormat == ExportFormat.SMD and (not is_armature) and mode in ('BOTH', 'VTA'):
+			try:
+				all_names = getMergedShapeNames(id)
+				if all_names:
+					first, last = resolveShapeRange(id, all_names)
+					selected = all_names[first:last + 1]
+					if len(selected) != len(all_names):
+						self._shape_filter = set(selected)
+			except ValueError:
+				# The preflight check reports range errors for top-level exports; the VTA writer will retry.
+				self._shape_filter = None
 		bench = BenchMarker()
 		
 		subdir = id.vs.subdir
@@ -539,17 +682,47 @@ class SmdExporter(bpy.types.Operator, Logger):
 			if skipped_bones:
 				print("- Skipping {} non-deforming bones".format(skipped_bones))
 
-		write_func = self.writeDMX if State.exportFormat == ExportFormat.DMX else self.writeSMD
+		has_mesh = any(bake.object.type != 'ARMATURE' for bake in bake_results)
+		write_smd = is_armature or not has_mesh or mode in ('BOTH', 'SMD')
+		write_vta = (not is_armature) and has_mesh and mode in ('BOTH', 'VTA')
+
+		if State.exportFormat == ExportFormat.SMD:
+			self.prepareNodeIDs(bake_results)
+			if write_smd and not write_vta and getMergedShapeNames(id):
+				print("- SMD only: skipped shape key baking and .vta writing")
+			elif write_vta and not write_smd:
+				print("- VTA only: not writing the SMD for \"{}\"".format(id.name))
+
 		bench.report("Post Bake")
 
-		if isinstance(id, bpy.types.Object) and id.type == 'ARMATURE' and id.data.vs.action_selection == 'FILTERED':
-			for action in actionsForFilter(id.vs.action_filter):
-				bake_results[0].object.animation_data.action = action
-				self.files_exported += write_func(id, bake_results, self.sanitiseFilename(action.name), path)
-				bench.report(write_func.__name__)
+		if State.exportFormat == ExportFormat.DMX:
+			if is_armature and id.data.vs.action_selection == 'FILTERED':
+				for action in actionsForFilter(id.vs.action_filter):
+					bake_results[0].object.animation_data.action = action
+					self.files_exported += self.writeDMX(id, bake_results, self.sanitiseFilename(action.name), path)
+					bench.report("DMX")
+			else:
+				self.files_exported += self.writeDMX(id, bake_results, self.sanitiseFilename(export_name), path)
+				bench.report("DMX")
 		else:
-			self.files_exported += write_func(id, bake_results, self.sanitiseFilename(export_name), path)
-			bench.report(write_func.__name__)
+			if is_armature and id.data.vs.action_selection == 'FILTERED':
+				exports = [(action.name, action) for action in actionsForFilter(id.vs.action_filter)]
+			else:
+				exports = [(export_name, None)]
+
+			for out_name, action in exports:
+				if action:
+					bake_results[0].object.animation_data.action = action
+				written = 0
+				if write_smd:
+					written += self.writeSMD(id, bake_results, self.sanitiseFilename(out_name), path)
+					bench.report("SMD")
+				if write_vta:
+					written += self.writeShapeVTA(id, bake_results, self.sanitiseFilename(out_name), path)
+					bench.report("VTA")
+				self.files_exported += written
+
+			self.files_exported += self.writeVertexAnimations(bake_results, path)
 		
 		# Source doesn't handle Unicode characters in models. Detect any unicode strings and warn the user about them.
 		unicode_tested = set()
@@ -741,6 +914,7 @@ class SmdExporter(bpy.types.Operator, Logger):
 				
 		if hasShapes(id):
 			id.active_shape_key_index = 0
+			id.show_only_shape_key = True # frame 0 of a VTA must be the basis shape, not the current mix
 
 		top_parent = self.getTopParent(id) # record this before changing hierarchies!
 		
@@ -813,7 +987,7 @@ class SmdExporter(bpy.types.Operator, Logger):
 				mod.show_viewport = False
 			elif mod.type == 'SOLIDIFY' and not solidify_fill_rim:
 				solidify_fill_rim = mod.use_rim
-			elif hasShapes(id) and mod.type == 'DECIMATE' and mod.decimate_type != 'UNSUBDIV':
+			elif getattr(self, "_bake_shapes", True) and hasShapes(id) and mod.type == 'DECIMATE' and mod.decimate_type != 'UNSUBDIV':
 				self.error(get_id("exporter_err_shapes_decimate", True).format(id.name,mod.decimate_type))
 				shapes_invalid = True
 		ops.object.mode_set(mode='OBJECT')
@@ -882,7 +1056,7 @@ class SmdExporter(bpy.types.Operator, Logger):
 			if vgroup.name not in baked.vertex_groups:
 				baked.vertex_groups.new(name=vgroup.name)
 		
-		if not shapes_invalid and hasShapes(id):
+		if getattr(self, "_bake_shapes", True) and not shapes_invalid and hasShapes(id):
 			# calculate vert balance
 			if State.exportFormat == ExportFormat.DMX:
 				if id.data.vs.flex_stereo_mode == 'VGROUP':
@@ -912,8 +1086,10 @@ class SmdExporter(bpy.types.Operator, Logger):
 			
 			# bake shapes
 			id.show_only_shape_key = True
+			shape_filter = getattr(self, "_shape_filter", None)
 			for i, shape in enumerate(id.data.shape_keys.key_blocks):
 				if i == 0: continue
+				if shape_filter is not None and shape.name not in shape_filter: continue
 				id.active_shape_key_index = i
 				depsgraph = bpy.context.evaluated_depsgraph_get()
 				baked_shape = bpy.data.meshes.new_from_object(id.evaluated_get(depsgraph))
@@ -969,6 +1145,49 @@ class SmdExporter(bpy.types.Operator, Logger):
 		print("-",full_path)
 		return f
 
+	def prepareNodeIDs(self, bake_results = None):
+		"""Assign bone and vcabone IDs once per exportable so the SMD/VTA/VCA writers agree."""
+		if bake_results is None:
+			bake_results = self.bake_results
+		self._node_lines = []
+		self.bone_ids = {}
+		curID = 0
+		if not self.armature:
+			self._node_lines.append((0, "root", -1))
+		else:
+			if self.armature.data.vs.implicit_zero_bone:
+				self._node_lines.append((0, implicit_bone_name, -1))
+				curID += 1
+			for bone in self.exportable_bones:
+				parent = bone.parent
+				while parent and not parent in self.exportable_bones:
+					parent = parent.parent
+				self.bone_ids[bone.name] = curID
+				self._node_lines.append((curID, bone.name, self.bone_ids[parent.name] if parent else -1))
+				curID += 1
+			num_bones = len(self.armature.data.bones)
+			max_bones = 128
+			if num_bones > max_bones:
+				self.warning(get_id("exporter_err_bonelimit", True).format(num_bones,max_bones))
+		for vca_name, vca in [(name, vca) for name, vca in bake_results[0].vertex_animations.items() if vca.export_sequence]:
+			curID += 1
+			vca.bone_id = curID
+			self._node_lines.append((curID, "vcabone_" + vca_name, -1))
+		self._node_ids_prepared = True
+
+	def writeNodes(self, filetype, bake_results = None):
+		if not getattr(self, "_node_ids_prepared", False):
+			self.prepareNodeIDs(bake_results)
+		self.smd_file.write("nodes\n")
+		for node_id, name, parent in self._node_lines:
+			self.smd_file.write('{} "{}" {}\n'.format(node_id, name, parent))
+		self.smd_file.write("end\n")
+		if filetype == 'smd':
+			if not self.armature:
+				print("- No skeleton to export")
+			else:
+				print("- Exported", len(self.armature.data.bones), "bones")
+
 	def writeSMD(self, id, bake_results, name, filepath, filetype = 'smd'):
 		bench = BenchMarker(1,"SMD")
 		goldsrc = bpy.context.scene.vs.smd_format == "GOLDSOURCE"
@@ -980,49 +1199,7 @@ class SmdExporter(bpy.types.Operator, Logger):
 			self.warning(get_id("exporter_warn_source2smdsupport"))
 
 		# BONES
-		self.smd_file.write("nodes\n")
-		curID = 0
-		if not self.armature:
-			self.smd_file.write("0 \"root\" -1\n")
-			if filetype == 'smd': print("- No skeleton to export")
-		else:
-			if self.armature.data.vs.implicit_zero_bone:
-				self.smd_file.write("0 \"{}\" -1\n".format(implicit_bone_name))
-				curID += 1
-			
-			# Write to file
-			for bone in self.exportable_bones:
-				parent = bone.parent
-				while parent and not parent in self.exportable_bones:
-					parent = parent.parent
-
-				line = "{} ".format(curID)
-				self.bone_ids[bone.name] = curID
-				curID += 1
-
-				bone_name = bone.name
-				line += "\"" + bone_name + "\" "
-
-				if parent:
-					line += str(self.bone_ids[parent.name])
-				else:
-					line += "-1"
-
-				self.smd_file.write(line + "\n")
-
-			num_bones = len(self.armature.data.bones)
-			if filetype == 'smd': print("- Exported",num_bones,"bones")
-			
-			max_bones = 128
-			if num_bones > max_bones:
-				self.warning(get_id("exporter_err_bonelimit", True).format(num_bones,max_bones))
-
-		for vca in [vca for vca in bake_results[0].vertex_animations.items() if vca[1].export_sequence]:
-			curID += 1
-			vca[1].bone_id = curID
-			self.smd_file.write("{} \"vcabone_{}\" -1\n".format(curID,vca[0]))
-
-		self.smd_file.write("end\n")
+		self.writeNodes(filetype, bake_results)
 		
 		if filetype == 'smd':
 			# ANIMATION
@@ -1166,81 +1343,124 @@ class SmdExporter(bpy.types.Operator, Logger):
 			
 			if done_header:
 				self.smd_file.write("end\n")
-		elif filetype == 'vta':
-			self.smd_file.write("skeleton\n")
-			
-			def _writeTime(time, shape_name = None):
-				self.smd_file.write( "time {}{}\n".format(time, " # {}".format(shape_name) if shape_name else ""))
-			
-			shape_names = ordered_set.OrderedSet()
-			for bake in [bake for bake in bake_results if bake.object.type != 'ARMATURE']:
-				for shape_name in bake.shapes.keys():
-					shape_names.add(shape_name)
-				
-			_writeTime(0)
-			for i, shape_name in enumerate(shape_names):
-				_writeTime(i+1, shape_name)
-			self.smd_file.write("end\n")
-
-			self.smd_file.write("vertexanimation\n")
-			
-			total_verts = 0
-			vert_id = 0
-			
-			def _makeVertLine(i,co,norm):
-				return "{} {} {}\n".format(i, getSmdVec(co), getSmdVec(norm))
-			
-			bake.object.data.calc_normals_split()
-
-			_writeTime(0)
-			for bake in [bake for bake in bake_results if bake.object.type != 'ARMATURE']:
-				bake.offset = vert_id
-				verts = bake.object.data.vertices
-				for loop in [bake.object.data.loops[l] for poly in bake.object.data.polygons for l in poly.loop_indices]:
-					self.smd_file.write(_makeVertLine(vert_id,verts[loop.vertex_index].co,loop.normal))
-					vert_id += 1
-			
-			for i, shape_name in enumerate(shape_names):
-				i += 1
-				bpy.context.window_manager.progress_update(i / len(shape_names))
-				_writeTime(i,shape_name)
-				for bake in [bake for bake in bake_results if bake.object.type != 'ARMATURE']:
-					shape = bake.shapes.get(shape_name)
-					if not shape: continue
-
-					shape.calc_normals_split()
-					
-					vert_index = bake.offset
-					mesh_verts = bake.object.data.vertices
-					shape_verts = shape.vertices
-
-					for mesh_loop in [bake.object.data.loops[l] for poly in bake.object.data.polygons for l in poly.loop_indices]:
-						shape_vert = shape_verts[mesh_loop.vertex_index]
-						shape_loop = shape.loops[mesh_loop.index]
-						mesh_vert = mesh_verts[mesh_loop.vertex_index]
-						diff_vec = shape_vert.co - mesh_vert.co
-						if diff_vec > epsilon or shape_loop.normal - mesh_loop.normal > epsilon:
-							self.smd_file.write(_makeVertLine(vert_index,shape_vert.co,shape_loop.normal))
-							total_verts += 1
-						vert_index += 1
-				
-			self.smd_file.write("end\n")
-			print("- Exported {} flex shapes ({} verts)".format(i,total_verts))
-
 		self.smd_file.close()
 
 		
 		if bench.quiet:
 			print("- {} export took".format(filetype.upper()) ,bench.total(),"\n")
 
-		written = 1
-		if filetype == 'smd':
-			for bake in [bake for bake in bake_results if bake.shapes]:
-				written += self.writeSMD(id,bake_results,name,filepath,filetype='vta')
-			for name,vca in bake_results[0].vertex_animations.items():
-				written += self.writeVCA(name,vca,filepath)
-				if vca.export_sequence:
-					written += self.writeVCASequence(name,vca,filepath)
+		return 1
+
+	def collectShapeNames(self, bake_results):
+		shape_names = ordered_set.OrderedSet()
+		for bake in [bake for bake in bake_results if bake.object.type != 'ARMATURE']:
+			for shape_name in bake.shapes.keys():
+				shape_names.add(shape_name)
+		return list(shape_names)
+
+	def writeShapeVTA(self, id, bake_results, name, filepath):
+		bench = BenchMarker(1,"VTA")
+		shape_names = self.collectShapeNames(bake_results)
+		if not shape_names:
+			if getattr(id.vs, "smd_vta_mode", 'BOTH') == 'VTA':
+				self.warning(get_id("vta_no_shapes", True).format(id.name))
+			return 0
+
+		try:
+			first_index, last_index = resolveShapeRange(id, shape_names)
+		except ValueError as err:
+			self.error(str(err))
+			return 0
+		if first_index != 0 or last_index != len(shape_names) - 1:
+			print("- VTA range: {} of {} shape keys ({} .. {})".format(last_index - first_index + 1, len(shape_names), shape_names[first_index], shape_names[last_index]))
+		shape_names = shape_names[first_index:last_index + 1]
+		if not shape_names:
+			return 0
+
+		self.smd_file = self.openSMD(filepath, name + ".vta", "vertex animation")
+		if self.smd_file == None: return 0
+
+		self.writeNodes('vta', bake_results)
+
+		self.smd_file.write("skeleton\n")
+		
+		def _writeTime(time, shape_name = None):
+			self.smd_file.write( "time {}{}\n".format(time, " # {}".format(shape_name) if shape_name else ""))
+		
+		_writeTime(0)
+		for i, shape_name in enumerate(shape_names):
+			_writeTime(i+1, shape_name)
+		self.smd_file.write("end\n")
+
+		self.smd_file.write("vertexanimation\n")
+		
+		total_verts = 0
+		vert_id = 0
+		
+		def _makeVertLine(i,co,norm):
+			return "{} {} {}\n".format(i, getSmdVec(co), getSmdVec(norm))
+		
+		bakes = [bake for bake in bake_results if bake.object.type != 'ARMATURE']
+		for bake in bakes:
+			bake.object.data.calc_normals_split()
+
+		skip_shape_normals = getattr(id.vs, "vta_skip_shape_normals", False)
+		if skip_shape_normals:
+			print("- VTA: reusing base normals for shape frames")
+
+		_writeTime(0)
+		for bake in bakes:
+			bake.offset = vert_id
+			verts = bake.object.data.vertices
+			for loop in [bake.object.data.loops[l] for poly in bake.object.data.polygons for l in poly.loop_indices]:
+				self.smd_file.write(_makeVertLine(vert_id,verts[loop.vertex_index].co,loop.normal))
+				vert_id += 1
+		
+		for i, shape_name in enumerate(shape_names):
+			i += 1
+			bpy.context.window_manager.progress_update(i / len(shape_names))
+			_writeTime(i,shape_name)
+			for bake in bakes:
+				shape = bake.shapes.get(shape_name)
+				if not shape: continue
+
+				if not skip_shape_normals:
+					shape.calc_normals_split()
+				
+				vert_index = bake.offset
+				mesh_verts = bake.object.data.vertices
+				shape_verts = shape.vertices
+
+				for mesh_loop in [bake.object.data.loops[l] for poly in bake.object.data.polygons for l in poly.loop_indices]:
+					shape_vert = shape_verts[mesh_loop.vertex_index]
+					mesh_vert = mesh_verts[mesh_loop.vertex_index]
+					diff_vec = shape_vert.co - mesh_vert.co
+					# mathutils compares vectors by length, so these are epsilon length tests.
+					if skip_shape_normals:
+						# VTA requires a normal column; reuse the base normal and only export moved vertices.
+						if diff_vec > epsilon:
+							self.smd_file.write(_makeVertLine(vert_index,shape_vert.co,mesh_loop.normal))
+							total_verts += 1
+					else:
+						shape_loop = shape.loops[mesh_loop.index]
+						if diff_vec > epsilon or shape_loop.normal - mesh_loop.normal > epsilon:
+							self.smd_file.write(_makeVertLine(vert_index,shape_vert.co,shape_loop.normal))
+							total_verts += 1
+					vert_index += 1
+			
+		self.smd_file.write("end\n")
+		print("- Exported {} flex shapes ({} verts)".format(len(shape_names),total_verts))
+		self.smd_file.close()
+		if bench.quiet:
+			print("- VTA export took",bench.total(),"\n")
+		return 1
+
+	def writeVertexAnimations(self, bake_results, filepath):
+		written = 0
+		for name,vca in bake_results[0].vertex_animations.items():
+			written += self.writeVCA(name,vca,filepath)
+			if vca.export_sequence:
+				written += self.writeVCASequence(name,vca,filepath)
 		return written
 
 	def writeVCA(self,name,vca,filepath):
@@ -1613,7 +1833,7 @@ skeleton
 						uv_layers_to_export.append((defaultUvLayer, layerGroups.uv[uv_render_layer]))
 						print("- Exporting '{}' as {}".format(uv_render_layer, defaultUvLayer))
 					else:
-						self.warning("'{}' does not contain a UV Map called {} and no suitable fallback map could be found. The model may be missing UV data.".format(bake.name, defaultUvLayer))
+						self.warning(get_id("exporter_warn_uvmap_missing", True).format(bake.name, defaultUvLayer))
 
 				for layer in uv_layers_to_export:
 					uv_set = ordered_set.OrderedSet()
@@ -1947,7 +2167,20 @@ skeleton
 						fc.update()
 
 					# finally, write it out
-					self.exportId(bpy.context,vca_arm)
+					# Keep the outer DMX mesh's bake/bone state intact for the remaining meshes.
+					saved_state = (
+						self.armature, self.armature_src,
+						list(getattr(self, "exportable_bones", [])),
+						list(self.bake_results), dict(self.bone_ids),
+						self._bake_shapes, self._shape_filter, self._node_ids_prepared)
+					self.exportId(bpy.context,vca_arm,reset_bakes=False)
+					(self.armature, self.armature_src, exportable_bones,
+					 self.bake_results, self.bone_ids,
+					 self._bake_shapes, self._shape_filter, self._node_ids_prepared) = saved_state
+					if exportable_bones:
+						self.exportable_bones = exportable_bones
+					elif hasattr(self, "exportable_bones"):
+						del self.exportable_bones
 					written += 1
 
 			if delta_states:

@@ -1,4 +1,6 @@
 #  Copyright (c) 2014 Tom Edwards contact@steamreview.org
+#  Modified by Kokkorylien, 2026-10-25: shape ranges, membership-based and
+#  hidden-object selection, independent list targets, and armature targeting.
 #
 # ##### BEGIN GPL LICENSE BLOCK #####
 #
@@ -81,7 +83,10 @@ class dmx_version:
 	@property
 	def format_enum(self): return str(self.format) + ("_modeldoc" if self.compiler == Compiler.MODELDOC else "")
 	@property
-	def format_title(self): return f"Model {self.format}" + (" (ModelDoc)" if self.compiler == Compiler.MODELDOC else "")
+	def format_title(self):
+		if self.compiler == Compiler.MODELDOC:
+			return get_id("dmx_model_modeldoc", True).format(self.format)
+		return get_id("dmx_model", True).format(self.format)
 
 dmx_versions_source1 = {
 'Ep1': dmx_version(0,0, "Half-Life 2: Episode One"),
@@ -151,6 +156,9 @@ class _StateMeta(type): # class properties are not supported below Python 3.9, s
 			return os.getenv('vproject')
 
 class State(metaclass=_StateMeta):
+	_selection = {}
+	_updating_export_list = False
+
 	@classmethod
 	def update_scene(cls, scene = None):
 		scene = scene or bpy.context.scene
@@ -167,20 +175,23 @@ class State(metaclass=_StateMeta):
 	@staticmethod
 	@persistent
 	def _onLoad(_):
+		State._selection.clear()
 		State.update_scene()
 		State._updateEngineBranch()
 		State._validateGamePath()
 
 	@classmethod
 	def hook_events(cls):
-		if not cls.update_scene in depsgraph_update_post:
+		if cls._onDepsgraphUpdate not in depsgraph_update_post:
 			depsgraph_update_post.append(cls._onDepsgraphUpdate)
+		if cls._onLoad not in load_post:
 			load_post.append(cls._onLoad)
 
 	@classmethod
 	def unhook_events(cls):
-		if cls.update_scene in depsgraph_update_post:
+		if cls._onDepsgraphUpdate in depsgraph_update_post:
 			depsgraph_update_post.remove(cls._onDepsgraphUpdate)
+		if cls._onLoad in load_post:
 			load_post.remove(cls._onLoad)
 
 	@staticmethod
@@ -215,8 +226,35 @@ def print(*args, newline=True, debug_only=False):
 
 def get_id(str_id, format_string = False, data = False):
 	from . import translations
-	out = translations.ids[str_id]
-	if format_string or (data and bpy.context.preferences.view.use_translate_new_dataname):
+	out = translations.ids.get(str_id)
+	if out is None:
+		out = str_id
+
+	if data and not bpy.context.preferences.view.use_translate_new_dataname:
+		return out
+
+	if not data:
+		try:
+			if not bpy.context.preferences.view.use_translate_interface:
+				return out
+		except Exception:
+			pass
+
+	locale = ""
+	try:
+		locale = bpy.app.translations.locale or ""
+	except Exception:
+		pass
+	if not locale or locale == 'DEFAULT':
+		try:
+			locale = bpy.context.preferences.view.language or ""
+		except Exception:
+			locale = ""
+
+	if locale in ('zh_HANS', 'zh_CN'):
+		return translations.zh_HANS.get(str_id, out)
+
+	if format_string or data:
 		return pgettext(out)
 	else:
 		return out
@@ -453,6 +491,62 @@ def countShapes(*objects):
 			else: num_shapes += 1
 	return num_shapes, num_correctives
 
+def getExportableMembers(id):
+	"""Objects that will be baked for this exportable, in the same order the exporter uses."""
+	if type(id) == bpy.types.Collection:
+		return [ob for ob in id.objects if ob.vs.export and ob.name in State.exportableObjects]
+	return [id]
+
+def getShapeKeyNames(ob):
+	"""Non-basis shape key names of a mesh-like object, in key block order."""
+	if ob is None or ob.type not in shape_types or not ob.data:
+		return []
+	shape_keys = getattr(ob.data, "shape_keys", None)
+	if not shape_keys:
+		return []
+	return [key.name for key in shape_keys.key_blocks[1:]]
+
+def getMergedShapeNames(id):
+	"""Shape key names in VTA frame order: the union across the exportable's meshes."""
+	names = []
+	seen = set()
+	for ob in getExportableMembers(id):
+		for name in getShapeKeyNames(ob):
+			if name not in seen:
+				seen.add(name)
+				names.append(name)
+	return names
+
+def resolveShapeRange(id, names):
+	"""Return the inclusive (first, last) indices selected by the exportable's VTA range.
+
+	Raises ValueError when the stored endpoint no longer exists or the range is inverted.
+	"""
+	if not names:
+		return 0, -1
+
+	first = getattr(id.vs, "vta_first_shape", "")
+	last = getattr(id.vs, "vta_last_shape", "")
+
+	if not first:
+		first_index = 0
+	elif first in names:
+		first_index = names.index(first)
+	else:
+		raise ValueError(get_id("vta_err_first_missing", True).format(first))
+
+	if not last:
+		last_index = len(names) - 1
+	elif last in names:
+		last_index = names.index(last)
+	else:
+		raise ValueError(get_id("vta_err_last_missing", True).format(last))
+
+	if first_index > last_index:
+		raise ValueError(get_id("vta_err_order", True).format(first, last))
+
+	return first_index, last_index
+
 def hasCurves(id):
 	def _test(id_):
 		return id_.type in ['CURVE','SURFACE','FONT']
@@ -485,45 +579,140 @@ def shouldExportGroup(group):
 def hasFlexControllerSource(source):
 	return bpy.data.texts.get(source) or os.path.exists(bpy.path.abspath(source))
 
-def getExportablesForObject(ob):
-	# objects can be reallocated between yields, so capture the name locally
+def getExportablesForObject(ob, context = None):
+	# Collection membership wins over a name match: a collection and a mesh can share a name.
 	ob_name = ob.name
-	seen = set()
+	scene = (context or bpy.context).scene
+	containing = []
+	own = None
 
-	while len(seen) < len(bpy.context.scene.vs.export_list):
-		# Handle the exportables list changing between yields by re-evaluating the whole thing
-		for exportable in bpy.context.scene.vs.export_list:
-			if not exportable.item:
-				continue # Observed only in Blender release builds without a debugger attached
+	for exportable in scene.vs.export_list:
+		item = exportable.item
+		if not item:
+			continue # Observed only in Blender release builds without a debugger attached
 
-			item_name = exportable.item.name
-			
-			seenKey = (item_name,type(exportable.item))
-			if seenKey in seen:
-				continue
-			seen.add(seenKey)
+		if exportable.ob_type == 'COLLECTION':
+			if not item.vs.mute and ob_name in item.objects:
+				containing.append(exportable)
+		elif item.name == ob_name:
+			own = exportable
 
-			if exportable.ob_type == 'COLLECTION' and not exportable.item.vs.mute and ob_name in exportable.item.objects:
-				yield exportable
-				break
+	if ob.type == 'ARMATURE' and own:
+		# An armature's animation exportable must remain reachable even when the armature is inside a collection.
+		yield own
+		return
 
-			if item_name == ob_name:
-				yield exportable
-				break
-
-def getSelectedExportables():
-	seen = set()
-	for ob in bpy.context.selected_objects:
-		for exportable in getExportablesForObject(ob):
-			if not exportable.name in seen:
-				seen.add(exportable.name)
-				yield exportable
-
-	if len(seen) == 0 and bpy.context.active_object:
-		for exportable in getExportablesForObject(bpy.context.active_object):
+	if containing:
+		for exportable in containing:
 			yield exportable
+	elif own:
+		yield own
+
+def getSelectionSignature(context = None, outliner_selection = None):
+	context = context or bpy.context
+	if outliner_selection is None:
+		outliner_selection = getOutlinerSelection(context)
+	layer_collection = getattr(context.view_layer, "active_layer_collection", None)
+	active = context.active_object
+	return (
+		tuple(sorted(ob.as_pointer() for ob in context.selected_objects)),
+		active.as_pointer() if active else 0,
+		layer_collection.collection.as_pointer() if layer_collection else 0,
+		tuple(sorted(item.as_pointer() for item in outliner_selection)),
+	)
+
+def getOutlinerSelection(context):
+	def selected_ids():
+		return tuple(item for item in getattr(context, 'selected_ids', ())
+			if isinstance(item, (bpy.types.Collection, bpy.types.Object)))
+
+	if context.area and context.area.type == 'OUTLINER':
+		return selected_ids()
+	if context.screen and hasattr(context, 'temp_override'):
+		for area in context.screen.areas:
+			if area.type == 'OUTLINER' and area.spaces.active.display_mode == 'VIEW_LAYER':
+				region = next(region for region in area.regions if region.type == 'WINDOW')
+				with context.temp_override(area=area, region=region):
+					return selected_ids()
+	return ()
+
+def getExportableKey(exportable):
+	item = exportable.item if exportable else None
+	return (exportable.ob_type, item.as_pointer()) if item else None
+
+def getSelectionState(context):
+	key = (context.scene.as_pointer(), context.view_layer.as_pointer())
+	outliner_selection = getOutlinerSelection(context)
+	signature = getSelectionSignature(context, outliner_selection)
+	state = State._selection.get(key)
+	if state is None or state['signature'] != signature:
+		previous = state['signature'] if state else None
+		# Read Outliner IDs to distinguish a collection from an already-active
+		# hidden object. Fall back to active-pointer changes outside the Outliner.
+		collection_changed = previous and previous[2] != signature[2] and previous[1] == signature[1]
+		outliner_changed = signature[3] and (previous is None or previous[3] != signature[3])
+		collection_selected = collection_changed or not (signature[0] or signature[1])
+		state = {
+			'signature': signature,
+			'source': 'OUTLINER' if outliner_changed else 'COLLECTION' if collection_selected else 'OBJECT',
+			'outliner': outliner_selection,
+			'exportable': None,
+		}
+		State._selection[key] = state
+	return state
+
+def getSelectedExportables(context = None):
+	context = context or bpy.context
+	state = getSelectionState(context)
+	if state['exportable']:
+		for exportable in context.scene.vs.export_list:
+			if getExportableKey(exportable) == state['exportable']:
+				yield exportable
+				return
+		state['exportable'] = None
+
+	seen = set()
+
+	layer_collection = getattr(context.view_layer, "active_layer_collection", None)
+	active_collection = layer_collection.collection if layer_collection else None
+	if state['source'] == 'OUTLINER':
+		selected = state['outliner']
+	elif state['source'] == 'COLLECTION' and active_collection:
+		selected = [active_collection]
+	else:
+		selected = list(context.selected_objects)
+		active = context.active_object
+		# selected_objects and select_get() both omit H-hidden objects. The
+		# active object is also needed in contexts without an Outliner.
+		if active and active not in selected and (not selected or not active.visible_get()):
+			selected.insert(0, active)
+	for item in selected:
+		if isinstance(item, bpy.types.Collection):
+			candidates = (exportable for exportable in context.scene.vs.export_list
+				if exportable.collection == item and not item.vs.mute)
+		else:
+			candidates = getExportablesForObject(item, context)
+		for exportable in candidates:
+			key = getExportableKey(exportable)
+			if key not in seen:
+				seen.add(key)
+				yield exportable
 
 def make_export_list(scene):
+	active = get_active_exportable() if scene == bpy.context.scene else None
+	active_key = getExportableKey(active)
+	State._updating_export_list = True
+	try:
+		_build_export_list(scene)
+		active_index = next((i for i, exportable in enumerate(scene.vs.export_list)
+			if getExportableKey(exportable) == active_key), None)
+		if active_index is None:
+			active_index = min(scene.vs.export_list_active, max(0, len(scene.vs.export_list) - 1))
+		scene.vs.export_list_active = active_index
+	finally:
+		State._updating_export_list = False
+
+def _build_export_list(scene):
 	scene.vs.export_list.clear()
 	
 	def makeDisplayName(item,name=None):

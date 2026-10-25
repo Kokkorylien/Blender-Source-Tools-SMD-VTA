@@ -1,4 +1,6 @@
-﻿#  Copyright (c) 2014 Tom Edwards contact@steamreview.org
+#  Copyright (c) 2014 Tom Edwards contact@steamreview.org
+#
+#  Modified by Kokkorylien, 2026-10-25: translatable import settings and messages.
 #
 # ##### BEGIN GPL LICENSE BLOCK #####
 #
@@ -51,9 +53,9 @@ class SmdImporter(bpy.types.Operator, Logger):
 		('APPEND',get_id("importer_bones_append"),get_id("importer_bones_append_desc")),
 		('NEW_ARMATURE',get_id("importer_bones_newarm"),get_id("importer_bones_newarm_desc"))),
 		default='APPEND')
-	upAxis : EnumProperty(name="Up Axis",items=axes,default='Z',description=get_id("importer_up_tip"))
-	rotMode : EnumProperty(name=get_id("importer_rotmode"),items=( ('XYZ', "Euler", ''), ('QUATERNION', "Quaternion", "") ),default='XYZ',description=get_id("importer_rotmode_tip"))
-	boneMode : EnumProperty(name=get_id("importer_bonemode"),items=(('NONE','Default',''),('ARROWS','Arrows',''),('SPHERE','Sphere','')),default='SPHERE',description=get_id("importer_bonemode_tip"))
+	upAxis : EnumProperty(name=get_id("importer_up_axis"),items=axes,default='Z',description=get_id("importer_up_tip"))
+	rotMode : EnumProperty(name=get_id("importer_rotmode"),items=( ('XYZ', get_id("importer_rot_euler"), ''), ('QUATERNION', get_id("importer_rot_quat"), "") ),default='XYZ',description=get_id("importer_rotmode_tip"))
+	boneMode : EnumProperty(name=get_id("importer_bonemode"),items=(('NONE',get_id("importer_bone_default"),''),('ARROWS',get_id("importer_bone_arrows"),''),('SPHERE',get_id("importer_bone_sphere"),'')),default='SPHERE',description=get_id("importer_bonemode_tip"))
 	
 	def execute(self, context):
 		pre_obs = set(bpy.context.scene.objects)
@@ -1473,7 +1475,7 @@ class SmdImporter(bpy.types.Operator, Logger):
 					vertex_layer_infos.append(VertexLayerInfo(normalsLayer, DmeVertexData[keywords['norm'] + "Indices"], DmeVertexData[keywords['norm']]))
 
 					# Arbitrary vertex data
-					def warnUneditableVertexData(name): self.warning("Vertex data '{}' was imported, but cannot be edited in Blender (as of 2.82)".format(name))
+					def warnUneditableVertexData(name): self.warning(get_id("importer_warn_uneditable_vertex", True).format(name))
 					def isClothEnableMap(name): return name.startswith("cloth_enable$")
 					
 					for vertexMap in [prop for prop in DmeVertexData["vertexFormat"] if prop not in keywords.values()]:
@@ -1500,7 +1502,7 @@ class SmdImporter(bpy.types.Operator, Logger):
 						elif isinstance(values[0], datamodel.Vector4) or isinstance(values[0], datamodel.Color):
 							layers = bm.loops.layers.color
 						else:
-							self.warning("Could not import vertex data '{}'; Blender does not support {} data layers.".format(vertexMap, type(values[0]).__name__))
+							self.warning(get_id("importer_warn_unsupported_vertex", True).format(vertexMap, type(values[0]).__name__))
 							continue
 
 						vertex_layer_infos.append(VertexLayerInfo(layers.new(vertexMap), DmeVertexData[vertexMap + "Indices"], values))
